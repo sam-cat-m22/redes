@@ -1,6 +1,7 @@
 package practica_2;
 import java.net.*;
 import java.io.*;
+import java.util.*;
 
 /**
  *
@@ -8,13 +9,15 @@ import java.io.*;
  * @author Sam
  */
 public class ServidorDrive {
+    private static final int PUERTO = 1234;
+    private static final String DIRECTORIO_RAIZ = "C:\\Users\\cesar\\OneDrive\\Documentos\\NetBeansProjects\\Practica_2\\DRIVE";
+    private static final int TAMANIO_VENTANA = 4;
+    private static Map<Integer, byte[]> bufferRecepcion = new HashMap<>(); // Almacenar los paquetes recibidos
+
     public static void main(String[] args) {
         try {
-            int puerto = 1234;
-            DatagramSocket socketServidor = new DatagramSocket(puerto);
-            System.out.println("Servidor iniciado en el puerto " + puerto);
-
-            String directorioRaiz = "C:\\Users\\cesar\\OneDrive\\Documentos\\NetBeansProjects\\Practica_2\\DRIVE";
+            DatagramSocket socketServidor = new DatagramSocket(PUERTO);
+            System.out.println("Servidor iniciado en el puerto " + PUERTO);
 
             while (true) {
                 byte[] bufferRecibir = new byte[1024];
@@ -25,17 +28,17 @@ public class ServidorDrive {
                 System.out.println("Comando recibido: " + comando);
 
                 if (comando.startsWith("LIST_DIRECTORY")) {
-                    listarContenido(comando, paqueteRecibido, socketServidor, directorioRaiz);
+                    listarContenido(comando, paqueteRecibido, socketServidor, DIRECTORIO_RAIZ);
                 } else if (comando.startsWith("CREATE_FOLDER")) {
-                    crearCarpeta(comando, paqueteRecibido, socketServidor, directorioRaiz);
+                    crearCarpeta(comando, paqueteRecibido, socketServidor, DIRECTORIO_RAIZ);
                 } else if (comando.startsWith("UPLOAD_FILE")) {
-                    subirArchivo(comando, paqueteRecibido, socketServidor);
+                    manejarSubidaArchivo(socketServidor, paqueteRecibido, comando);
                 } else if (comando.startsWith("NAVIGATE")) {
-                    navegarCarpeta(comando, paqueteRecibido, socketServidor, directorioRaiz);
+                    navegarCarpeta(comando, paqueteRecibido, socketServidor, DIRECTORIO_RAIZ);
                 } else if (comando.startsWith("DELETE_FILE")) {
-                    eliminarArchivo(comando, paqueteRecibido, socketServidor, directorioRaiz);
+                    eliminarArchivo(comando, paqueteRecibido, socketServidor, DIRECTORIO_RAIZ);
                 } else if (comando.startsWith("RENAME_FILE")) {
-                    renombrarArchivo(comando, paqueteRecibido, socketServidor, directorioRaiz);
+                    renombrarArchivo(comando, paqueteRecibido, socketServidor, DIRECTORIO_RAIZ);
                 }
             }
         } catch (Exception e) {
@@ -107,23 +110,63 @@ public class ServidorDrive {
         }
     }
 
-    private static void subirArchivo(String comando, DatagramPacket paqueteRecibido, DatagramSocket socketServidor) {
-        try {
-            System.out.println("Preparado para recibir archivo...");
+    private static void manejarSubidaArchivo(DatagramSocket socketServidor, DatagramPacket paqueteRecibido, String comando) throws IOException {
+        String[] partes = comando.split(":");
+        String rutaArchivo = partes[1];
+        long tamanioArchivo = Long.parseLong(partes[2]);
 
-            String respuesta = "READY_FOR_UPLOAD";
-            byte[] bufferRespuesta = respuesta.getBytes();
-            InetAddress direccionCliente = paqueteRecibido.getAddress();
-            int puertoCliente = paqueteRecibido.getPort();
+        System.out.println("Preparado para recibir archivo: " + rutaArchivo + " con tamaño: " + tamanioArchivo);
+        File archivoDestino = new File(DIRECTORIO_RAIZ + rutaArchivo);
+        FileOutputStream fos = new FileOutputStream(archivoDestino);
 
-            DatagramPacket paqueteRespuesta = new DatagramPacket(bufferRespuesta, bufferRespuesta.length, direccionCliente, puertoCliente);
-            socketServidor.send(paqueteRespuesta);
-            System.out.println("Respuesta enviada al cliente para proceder con el archivo...");
+        int numeroPaqueteEsperado = 0;
+        int totalPaquetes = (int) Math.ceil((double) tamanioArchivo / 1024);
+        boolean archivoCompleto = false;
 
-        } catch (Exception e) {
-            e.printStackTrace();
+        while (!archivoCompleto) {
+            try {
+                byte[] bufferPaquete = new byte[1028]; // 1024 bytes de datos + 4 bytes para el número de secuencia
+                DatagramPacket paqueteDatos = new DatagramPacket(bufferPaquete, bufferPaquete.length);
+                socketServidor.receive(paqueteDatos);
+
+                ByteArrayInputStream bais = new ByteArrayInputStream(paqueteDatos.getData());
+                DataInputStream dis = new DataInputStream(bais);
+                int numeroPaquete = dis.readInt();
+                byte[] datos = new byte[paqueteDatos.getLength() - 4];
+                dis.read(datos);
+
+                if (numeroPaquete == numeroPaqueteEsperado) {
+                    fos.write(datos);
+                    fos.flush();
+                    bufferRecepcion.put(numeroPaquete, datos);
+                    numeroPaqueteEsperado++;
+                } else {
+                    System.out.println("Paquete fuera de secuencia. Esperado: " + numeroPaqueteEsperado + ", recibido: " + numeroPaquete);
+                }
+
+                // Enviar ACK para el paquete recibido
+                String respuestaACK = "ACK:" + numeroPaquete;
+                byte[] bufferACK = respuestaACK.getBytes();
+                InetAddress direccionCliente = paqueteDatos.getAddress();
+                int puertoCliente = paqueteDatos.getPort();
+
+                DatagramPacket paqueteACK = new DatagramPacket(bufferACK, bufferACK.length, direccionCliente, puertoCliente);
+                socketServidor.send(paqueteACK);
+                System.out.println("ACK enviado para el paquete: " + numeroPaquete);
+
+                // Verificar si se han recibido todos los paquetes
+                if (numeroPaqueteEsperado >= totalPaquetes) {
+                    archivoCompleto = true;
+                    System.out.println("Archivo recibido completamente: " + rutaArchivo);
+                }
+
+            } catch (SocketTimeoutException e) {
+                System.out.println("Tiempo de espera agotado, esperando retransmisión del paquete: " + numeroPaqueteEsperado);
+            }
         }
+        fos.close();
     }
+
 
     private static void navegarCarpeta(String comando, DatagramPacket paqueteRecibido, DatagramSocket socketServidor, String directorioRaiz) {
         try {
