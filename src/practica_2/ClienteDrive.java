@@ -1,6 +1,9 @@
 package practica_2;
 import java.net.*;
 import java.io.*;
+import java.util.ArrayList;
+import java.util.List;
+import javax.swing.JFileChooser;
 
 /**
  *
@@ -77,7 +80,7 @@ public class ClienteDrive {
         } else if (opcionSeleccionada == indiceAdicional) {
             crearCarpeta(socketCliente, direccionIP, puertoServidor, reader);
         } else if (opcionSeleccionada == (indiceAdicional + 1)) {
-            subirArchivo(reader);
+           subirArchivo(socketCliente, direccionIP, puertoServidor) ;
         } else {
             System.out.println("Opción no válida, intente nuevamente.");
         }
@@ -102,21 +105,12 @@ public class ClienteDrive {
     private static void manejarCarpeta(DatagramSocket socketCliente, InetAddress direccionIP, int puertoServidor, BufferedReader reader, String recursoSeleccionado) throws IOException {
         System.out.println("¿Qué desea hacer con la carpeta?");
         System.out.println("1) Abrir carpeta");
-        System.out.println("2) Crear nueva subcarpeta");
-        System.out.println("3) Subir archivo");
-        System.out.println("4) Regresar al nivel anterior");
-        System.out.println("5) Cancelar");
+        System.out.println("2) Cancelar");
 
         int accionSeleccionada = Integer.parseInt(reader.readLine().trim());
         if (accionSeleccionada == 1) {
             String nombreCarpeta = recursoSeleccionado.substring(3).trim();
             rutaActual += nombreCarpeta + "/";
-        } else if (accionSeleccionada == 2) {
-            crearCarpeta(socketCliente, direccionIP, puertoServidor, reader);
-        } else if (accionSeleccionada == 3) {
-            subirArchivo(reader);
-        } else if (accionSeleccionada == 4) {
-            rutaActual = navegarAtras();
         } else {
             System.out.println("Acción cancelada.");
         }
@@ -151,11 +145,87 @@ public class ClienteDrive {
         System.out.println("Respuesta del servidor: " + respuestaCrearCarpeta);
     }
 
-    private static void subirArchivo(BufferedReader reader) throws IOException {
-        System.out.println("Ingrese la ruta del archivo que desea subir:");
-        String rutaArchivo = reader.readLine().trim();
-        System.out.println("Subiendo archivo: " + rutaArchivo);
-        // Implementación para subir el archivo al servidor
+    private static void subirArchivo(DatagramSocket socketCliente, InetAddress direccionIP, int puertoServidor) throws IOException {
+        JFileChooser fileChooser = new JFileChooser();
+        int seleccion = fileChooser.showOpenDialog(null);
+
+        if (seleccion == JFileChooser.APPROVE_OPTION) {
+            File archivo = fileChooser.getSelectedFile();
+            String nombreArchivo = archivo.getName();
+            long tamanioArchivo = archivo.length();
+
+            // Enviar metadatos del archivo
+            String comandoSubirArchivo = "UPLOAD_FILE:" + rutaActual + nombreArchivo + ":" + tamanioArchivo;
+            byte[] bufferComandoSubirArchivo = comandoSubirArchivo.getBytes();
+            DatagramPacket paqueteSubirArchivo = new DatagramPacket(bufferComandoSubirArchivo, bufferComandoSubirArchivo.length, direccionIP, puertoServidor);
+            socketCliente.send(paqueteSubirArchivo);
+            System.out.println("Comando 'UPLOAD_FILE' enviado al servidor...");
+
+            // Fragmentar y enviar el archivo en partes utilizando ventana deslizante
+            byte[] bufferArchivo = new byte[1024];
+            FileInputStream fis = new FileInputStream(archivo);
+            int bytesLeidos;
+            int numeroPaquete = 0;
+            int tamanioVentana = 4; // Tamaño de la ventana deslizante
+            List<DatagramPacket> ventana = new ArrayList<>();
+
+            while ((bytesLeidos = fis.read(bufferArchivo)) != -1) {
+                // Crear el paquete con el número de secuencia y los datos del fragmento
+                ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                DataOutputStream dos = new DataOutputStream(baos);
+                dos.writeInt(numeroPaquete);
+                dos.write(bufferArchivo, 0, bytesLeidos);
+                byte[] datosPaquete = baos.toByteArray();
+
+                DatagramPacket paquete = new DatagramPacket(datosPaquete, datosPaquete.length, direccionIP, puertoServidor);
+                ventana.add(paquete);
+
+                // Enviar los paquetes de la ventana
+                if (ventana.size() == tamanioVentana) {
+                    enviarVentana(socketCliente, ventana);
+                    ventana.clear();
+                }
+                numeroPaquete++;
+            }
+
+            // Enviar cualquier paquete restante en la ventana
+            if (!ventana.isEmpty()) {
+                enviarVentana(socketCliente, ventana);
+            }
+
+            fis.close();
+            System.out.println("Archivo enviado correctamente.");
+        } else {
+            System.out.println("Operación de subida cancelada.");
+        }
+    }
+
+    private static void enviarVentana(DatagramSocket socketCliente, List<DatagramPacket> ventana) throws IOException {
+        for (DatagramPacket paquete : ventana) {
+            socketCliente.send(paquete);
+            System.out.println("Enviando paquete con número de secuencia: " + new DataInputStream(new ByteArrayInputStream(paquete.getData())).readInt());
+            // Esperar el ACK del servidor para cada paquete
+            esperarACK(socketCliente, paquete);
+        }
+    }
+
+    private static void esperarACK(DatagramSocket socketCliente, DatagramPacket paquete) throws IOException {
+        byte[] bufferACK = new byte[1024];
+        DatagramPacket paqueteACK = new DatagramPacket(bufferACK, bufferACK.length);
+        try {
+            socketCliente.setSoTimeout(2000); // Establecer un tiempo de espera de 2 segundos
+            socketCliente.receive(paqueteACK);
+            String respuesta = new String(paqueteACK.getData(), 0, paqueteACK.getLength());
+            if (!respuesta.equals("ACK:" + new DataInputStream(new ByteArrayInputStream(paquete.getData())).readInt())) {
+                System.out.println("No se recibió el ACK esperado, reenviando paquete...");
+                socketCliente.send(paquete); // Reenviar paquete si no se recibe el ACK correcto
+            } else {
+                System.out.println("ACK recibido para el paquete " + new DataInputStream(new ByteArrayInputStream(paquete.getData())).readInt());
+            }
+        } catch (SocketTimeoutException e) {
+            System.out.println("Tiempo de espera agotado para el ACK, reenviando paquete...");
+            socketCliente.send(paquete); // Reenviar paquete si se agota el tiempo de espera
+        }
     }
 
     private static String navegarAtras() {
