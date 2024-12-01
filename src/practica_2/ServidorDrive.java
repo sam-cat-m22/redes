@@ -14,12 +14,14 @@ public class ServidorDrive {
     private static final int TAMANIO_VENTANA = 4;
     private static Map<Integer, byte[]> bufferRecepcion = new HashMap<>(); // Almacenar los paquetes recibidos
 
-    public static void main(String[] args) {
-        try {
-            DatagramSocket socketServidor = new DatagramSocket(PUERTO);
-            System.out.println("Servidor iniciado en el puerto " + PUERTO);
+public static void main(String[] args) {
+    try {
+        DatagramSocket socketServidor = new DatagramSocket(PUERTO);
+        socketServidor.setSoTimeout(5000); // Configurar tiempo de espera de 5 segundos
+        System.out.println("Servidor iniciado en el puerto " + PUERTO);
 
-            while (true) {
+        while (true) {
+            try {
                 byte[] bufferRecibir = new byte[1024];
                 DatagramPacket paqueteRecibido = new DatagramPacket(bufferRecibir, bufferRecibir.length);
                 socketServidor.receive(paqueteRecibido);
@@ -39,12 +41,24 @@ public class ServidorDrive {
                     eliminarArchivo(comando, paqueteRecibido, socketServidor, DIRECTORIO_RAIZ);
                 } else if (comando.startsWith("RENAME_FILE")) {
                     renombrarArchivo(comando, paqueteRecibido, socketServidor, DIRECTORIO_RAIZ);
+                } else if (comando.startsWith("DOWNLOAD_FILE")) {
+                    descargarArchivo(comando, paqueteRecibido, socketServidor, DIRECTORIO_RAIZ);
+                } else if (comando.startsWith("DELETE_FOLDER")) {
+                    borrarCarpeta(comando, paqueteRecibido, socketServidor, DIRECTORIO_RAIZ);
                 }
+            } catch (SocketTimeoutException e) {
+                // Tiempo de espera agotado, continuar esperando nuevos paquetes
+                System.out.println("Tiempo de espera agotado, esperando nuevos paquetes...");
+            } catch (Exception e) {
+                // Manejar otras excepciones y continuar el bucle principal
+                System.err.println("Error manejando comando: " + e.getMessage());
+                e.printStackTrace();
             }
-        } catch (Exception e) {
-            e.printStackTrace();
         }
+    } catch (Exception e) {
+        e.printStackTrace();
     }
+}
 
     private static void listarContenido(String comando, DatagramPacket paqueteRecibido, DatagramSocket socketServidor, String directorioRaiz) {
         try {
@@ -109,6 +123,60 @@ public class ServidorDrive {
             e.printStackTrace();
         }
     }
+private static void borrarCarpeta(String comando, DatagramPacket paqueteRecibido, DatagramSocket socketServidor, String directorioRaiz) {
+    try {
+        // Parsear el comando para obtener la ruta de la carpeta
+        String[] partes = comando.split(":");
+        String rutaNuevaCarpeta = partes.length > 1 ? partes[1] : "";
+        String rutaAbsoluta = directorioRaiz + rutaNuevaCarpeta.replace("/", "\\");
+
+        File nuevaCarpeta = new File(rutaAbsoluta);
+        String respuesta;
+
+        // Verificar si la carpeta existe
+        if (nuevaCarpeta.exists() && nuevaCarpeta.isDirectory()) {
+            // Eliminar la carpeta y su contenido
+            if (eliminarCarpetaRecursiva(nuevaCarpeta)) {
+                respuesta = "Carpeta borrada con éxito: " + rutaNuevaCarpeta;
+            } else {
+                respuesta = "ERROR: No se pudo borrar la carpeta completamente.";
+            }
+        } else {
+            respuesta = "ERROR: La carpeta especificada no existe.";
+        }
+
+        // Enviar respuesta al cliente
+        byte[] bufferRespuesta = respuesta.getBytes();
+        InetAddress direccionCliente = paqueteRecibido.getAddress();
+        int puertoCliente = paqueteRecibido.getPort();
+
+        DatagramPacket paqueteRespuesta = new DatagramPacket(bufferRespuesta, bufferRespuesta.length, direccionCliente, puertoCliente);
+        socketServidor.send(paqueteRespuesta);
+        System.out.println("Respuesta enviada al cliente: " + respuesta);
+
+    } catch (Exception e) {
+        e.printStackTrace();
+    }
+}
+
+// Función auxiliar recursiva para eliminar el contenido de una carpeta
+private static boolean eliminarCarpetaRecursiva(File carpeta) {
+    if (carpeta.isDirectory()) {
+        // Obtener todos los archivos y subdirectorios
+        File[] archivos = carpeta.listFiles();
+        if (archivos != null) {
+            for (File archivo : archivos) {
+                // Eliminar archivos y subdirectorios recursivamente
+                if (!eliminarCarpetaRecursiva(archivo)) {
+                    return false; // Si falla al eliminar algo, retorna false
+                }
+            }
+        }
+    }
+    // Eliminar la carpeta o archivo (cuando ya está vacía)
+    return carpeta.delete();
+}
+
 
     private static void manejarSubidaArchivo(DatagramSocket socketServidor, DatagramPacket paqueteRecibido, String comando) throws IOException {
         String[] partes = comando.split(":");
@@ -235,10 +303,114 @@ public class ServidorDrive {
             socketServidor.send(paqueteRespuesta);
             System.out.println("Respuesta enviada al cliente: " + respuesta);
 
-        } catch (Exception e) {
+        } catch (IOException e) {
             e.printStackTrace();
         }
     }
+
+    private static void descargarArchivo(String comando, DatagramPacket paqueteRecibido, DatagramSocket socketServidor, String directorioRaiz) {
+    try {
+        InetAddress direccionCliente = paqueteRecibido.getAddress();
+        int puertoCliente = paqueteRecibido.getPort();
+
+        // Parsear el comando y obtener la ruta del archivo
+        String[] partes = comando.split(":");
+        String rutaArchivo = partes.length > 1 ? partes[1] : "";
+        String rutaAbsoluta = directorioRaiz + rutaArchivo.replace("/", "\\");
+
+        File archivo = new File(rutaAbsoluta);
+        if (!archivo.exists()) {
+            System.out.println("Error: El archivo no existe.");
+            String respuestaError = "ERROR:Archivo no encontrado";
+            socketServidor.send(new DatagramPacket(respuestaError.getBytes(), respuestaError.getBytes().length, direccionCliente, puertoCliente));
+            return;
+        }
+
+        long tamanioArchivo = archivo.length();
+        String tamanioArchivoStr = String.valueOf(tamanioArchivo);
+
+        // Enviar tamaño del archivo al cliente
+        byte[] bufferRespuesta = tamanioArchivoStr.getBytes();
+        DatagramPacket paqueteRespuesta = new DatagramPacket(bufferRespuesta, bufferRespuesta.length, direccionCliente, puertoCliente);
+        socketServidor.send(paqueteRespuesta);
+        System.out.println("Tamaño del archivo enviado al cliente: " + tamanioArchivo);
+
+        // Esperar confirmación del cliente
+        byte[] bufferConfirmacion = new byte[1024];
+        DatagramPacket paqueteConfirmacion = new DatagramPacket(bufferConfirmacion, bufferConfirmacion.length);
+        socketServidor.receive(paqueteConfirmacion);
+        String confirmacion = new String(paqueteConfirmacion.getData(), 0, paqueteConfirmacion.getLength()).trim();
+        System.out.println("Confirmación recibida del cliente: " + confirmacion);
+
+
+            // Fragmentar y enviar el archivo en partes utilizando ventana deslizante
+            byte[] bufferArchivo = new byte[1024];
+            FileInputStream fis = new FileInputStream(archivo);
+            int bytesLeidos;
+            int numeroPaquete = 0;
+            int tamanioVentana = 4; // Tamaño de la ventana deslizante
+            List<DatagramPacket> ventana = new ArrayList<>();
+
+            while ((bytesLeidos = fis.read(bufferArchivo)) != -1) {
+                // Crear el paquete con el número de secuencia y los datos del fragmento
+                ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                DataOutputStream dos = new DataOutputStream(baos);
+                dos.writeInt(numeroPaquete);
+                dos.write(bufferArchivo, 0, bytesLeidos);
+                byte[] datosPaquete = baos.toByteArray();
+
+                DatagramPacket paquete = new DatagramPacket(datosPaquete, datosPaquete.length, direccionCliente, puertoCliente);
+                ventana.add(paquete);
+
+                // Enviar los paquetes de la ventana
+                if (ventana.size() == tamanioVentana) {
+                    enviarVentana(socketServidor, ventana);
+                    ventana.clear();
+                }
+                numeroPaquete++;
+            }
+
+            // Enviar cualquier paquete restante en la ventana
+            if (!ventana.isEmpty()) {
+                enviarVentana(socketServidor, ventana);
+            }
+
+            fis.close();
+            System.out.println("Archivo enviado correctamente.");
+    } catch (Exception e) {
+        e.printStackTrace();
+    }
+}
+
+    
+
+private static void enviarVentana(DatagramSocket socketServidor, List<DatagramPacket> ventana) throws IOException {
+    for (DatagramPacket paquete : ventana) {
+        socketServidor.send(paquete);
+        System.out.println("Enviando paquete con número de secuencia: " + new DataInputStream(new ByteArrayInputStream(paquete.getData())).readInt());
+        esperarACK(socketServidor, paquete);
+    }
+}
+
+private static void esperarACK(DatagramSocket socketServidor, DatagramPacket paquete) throws IOException {
+    byte[] bufferACK = new byte[1024];
+    DatagramPacket paqueteACK = new DatagramPacket(bufferACK, bufferACK.length);
+    try {
+        socketServidor.setSoTimeout(2000); // Tiempo de espera de 2 segundos
+        socketServidor.receive(paqueteACK);
+        String respuesta = new String(paqueteACK.getData(), 0, paqueteACK.getLength());
+        if (!respuesta.equals("ACK:" + new DataInputStream(new ByteArrayInputStream(paquete.getData())).readInt())) {
+            System.out.println("No se recibió el ACK esperado, reenviando paquete...");
+            socketServidor.send(paquete); // Reenviar paquete si no se recibe el ACK correcto
+        } else {
+            System.out.println("ACK recibido para el paquete " + new DataInputStream(new ByteArrayInputStream(paquete.getData())).readInt());
+        }
+    } catch (SocketTimeoutException e) {
+        System.out.println("Tiempo de espera agotado para el ACK, reenviando paquete...");
+        socketServidor.send(paquete); // Reenviar paquete si se agota el tiempo de espera
+    }
+}
+
 
     private static void renombrarArchivo(String comando, DatagramPacket paqueteRecibido, DatagramSocket socketServidor, String directorioRaiz) {
         try {
